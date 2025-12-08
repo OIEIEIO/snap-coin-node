@@ -1362,9 +1362,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "snap-coin"
-version = "1.0.2"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44e0eb9656406c5c01d6e875040a057366922449ccb245e96f8fec63c82505f8"
+checksum = "655992e4b83e38e3cc91490707d351237c399eaecfa4ce2e0a006ff388a192b3"
 dependencies = [
  "anyhow",
  "argon2",
