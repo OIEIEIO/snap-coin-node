@@ -3,19 +3,85 @@ use std::{
     io::{Write, stdout},
     net::SocketAddr,
     str::FromStr,
+    sync::Arc,
     time::Duration,
     vec,
 };
 
-use tokio::time::sleep;
+use tokio::{sync::RwLock, time::sleep};
 
 use crossterm::{
     ExecutableCommand, cursor,
     terminal::{self, ClearType, size},
 };
-use snap_coin::{api::api_server::Server, build_block, economics::DEV_WALLET, node::node::Node};
+use snap_coin::{
+    api::api_server::Server, build_block, core::block::Block, economics::DEV_WALLET, node::{
+        message::{Command, Message},
+        node::Node,
+        peer::Peer,
+    }
+};
 use std::io::Read;
 use tracing_subscriber::prelude::*;
+
+async fn sync_genesis_from_peer(peer: Arc<RwLock<Peer>>) -> Option<Block> {
+    // Get genesis hash
+    let genesis_hash = match Peer::request(
+        peer.clone(),
+        Message::new(Command::GetBlockHashes { start: 0, end: 1 }),
+    )
+    .await
+    {
+        Ok(resp) => match resp.command {
+            Command::GetBlockHashesResponse { block_hashes } => block_hashes.get(0).cloned(),
+            _ => {
+                Node::log("Failed to fetch genesis: invalid GetBlockHashes response".into());
+                return None;
+            }
+        },
+        Err(err) => {
+            Node::log(format!("Failed to fetch genesis: request error: {err}"));
+            return None;
+        }
+    };
+
+    let genesis_hash = match genesis_hash {
+        Some(hash) => hash,
+        None => {
+            Node::log("Failed to fetch genesis: no genesis hash returned".into());
+            return None;
+        }
+    };
+
+    // Get genesis block
+    let genesis_block = match Peer::request(
+        peer.clone(),
+        Message::new(Command::GetBlock {
+            block_hash: genesis_hash,
+        }),
+    )
+    .await
+    {
+        Ok(resp) => match resp.command {
+            Command::GetBlockResponse { block } => match block {
+                Some(block) => block,
+                None => {
+                    Node::log("Failed to fetch genesis: peer returned None for block".into());
+                    return None;
+                }
+            },
+            _ => {
+                Node::log("Failed to fetch genesis: invalid GetBlock response".into());
+                return None;
+            }
+        },
+        Err(err) => {
+            Node::log(format!("Failed to fetch genesis: request error: {err}"));
+            return None;
+        }
+    };
+    Some(genesis_block)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -84,6 +150,19 @@ async fn main() -> Result<(), anyhow::Error> {
         #[allow(deprecated)]
         genesis.compute_pow()?;
         Node::submit_block(node.clone(), genesis).await?;
+    } else if node.read().await.blockchain.get_height() == 0 && peers.len() > 0 {
+        Node::log("Synchronizing genesis block!".into());
+        println!("Synchronizing genesis block!");
+        let block = sync_genesis_from_peer(node.read().await.peers[0].clone()).await;
+
+        match block {
+            Some(block) => {
+                Node::log(format!("Genesis block status: {:?}", node.write().await.blockchain.add_block(block)))
+            },
+            None => {
+                Node::log("Failed to fetch genesis block!".into());
+            }
+        }
     }
 
     // Start logger
