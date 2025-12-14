@@ -240,6 +240,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut api_port = 3003;
     let mut node_port = 8998;
     let mut create_genesis = false;
+    let mut headless = false;
 
     // ------------------------------------------------------
     // ARGUMENTS
@@ -254,6 +255,9 @@ async fn main() -> Result<(), anyhow::Error> {
         }
         if arg.1 == "--no-api" {
             start_api = false;
+        }
+        if arg.1 == "--headless" {
+            headless = true;
         }
         if arg.1 == "--create-genesis" {
             create_genesis = true;
@@ -271,9 +275,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 .with(console_subscriber::spawn())
                 .try_init()
                 .is_err()
-            {
-                println!("Not using tracer!");
-            }
+            {}
         }
     }
 
@@ -284,19 +286,17 @@ async fn main() -> Result<(), anyhow::Error> {
             Ok(addrs) => {
                 if let Some(addr) = addrs.into_iter().next() {
                     resolved_peers.push(addr);
-                } else {
-                    eprintln!("No addresses found for {}", seed);
                 }
             }
-            Err(e) => {
-                eprintln!("Failed to resolve {}: {}", seed, e);
+            Err(_) => {
+                return Err(anyhow!("Failed to resolve or parse seed peer: {seed}"))
             }
         }
     }
 
     let node = Node::new(node_path, node_port);
     node.write().await.is_syncing = true;
-    let _handle = Node::init(node.clone(), resolved_peers).await?;
+    let handle = Node::init(node.clone(), resolved_peers.clone()).await?;
 
     if start_api {
         sleep(Duration::from_secs(1)).await;
@@ -314,7 +314,7 @@ async fn main() -> Result<(), anyhow::Error> {
         genesis.compute_pow()?;
         Node::submit_block(node.clone(), genesis).await?;
     }
-    if !peers.is_empty() {
+    if !resolved_peers.is_empty() {
         let peer = node.read().await.peers[0].clone();
         let node = node.clone();
         tokio::spawn(async move {
@@ -329,11 +329,11 @@ async fn main() -> Result<(), anyhow::Error> {
         node.write().await.is_syncing = false;
     }
 
-    // ------------------------------------------------------
-    // NEW TUI CALL
-    // ------------------------------------------------------
-
-    run_tui(node.clone(), node_port, node_path.to_string()).await?;
+    if headless {
+        println!("{:?}", handle.await);
+    } else {
+        run_tui(node.clone(), node_port, node_path.to_string()).await?;
+    }
 
     Ok(())
 }
