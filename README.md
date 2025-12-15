@@ -21,6 +21,9 @@ Specified seed nodes, from which this node wil find other nodes to connect too a
 2. `--no-api`
 Disable Snap Coin API.
 
+2. `--headless`
+Disable terminal ui, doesn't even print to TTY. Only to info.log 
+
 3. `--node-path [path]`
 Specify path where the node will store its state.
 
