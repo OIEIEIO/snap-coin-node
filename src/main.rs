@@ -34,7 +34,7 @@ async fn sync_blockchain(
     peer: Arc<RwLock<Peer>>,
     node: Arc<RwLock<Node>>,
 ) -> Result<(), anyhow::Error> {
-    Node::log("[SYNC] Starting blockchain sync".into());
+    Node::log("[SYNC] Starting initial block download".into());
     Node::log("[SYNC] Fetching block hashes".into());
     let local_height = node.read().await.blockchain.get_height();
     let remote_height = match Peer::request(
@@ -119,6 +119,7 @@ async fn run_tui(node: Arc<RwLock<Node>>, node_port: u16, node_path: String) -> 
 
             // Blockchain
             let height = guard.blockchain.get_height();
+            let syncing = guard.is_syncing;
             let last_block = guard
                 .blockchain
                 .get_block_hash_by_height(height.saturating_sub(1))
@@ -133,10 +134,10 @@ async fn run_tui(node: Arc<RwLock<Node>>, node_port: u16, node_path: String) -> 
                 peer_snaps.push((p.address.clone(), p.is_client));
             }
 
-            (height, last_block, peer_snaps)
+            (height, last_block, peer_snaps, syncing)
         };
 
-        let (height, last_block, peer_snaps) = node_state;
+        let (height, last_block, peer_snaps, syncing) = node_state;
 
         // --- READ LOG (INFREQUENTLY, NON-BLOCKING) ---
         if last_log_read.elapsed() > Duration::from_millis(300) {
@@ -159,8 +160,8 @@ async fn run_tui(node: Arc<RwLock<Node>>, node_port: u16, node_path: String) -> 
 
             // TOP BAR
             let bar1 = Paragraph::new(format!(
-                "PORT: {} | HEIGHT: {} | LAST_BLOCK: {}",
-                node_port, height, last_block
+                "P: {} | H: {} | L: {} | S: {}",
+                node_port, height, last_block, syncing
             ))
             .block(
                 ratatui::widgets::Block::default()
@@ -257,7 +258,7 @@ async fn main() -> Result<(), anyhow::Error> {
         if arg.1 == "--no-api" {
             start_api = false;
         }
-        if arg.1 == "--no-api" {
+        if arg.1 == "--no-ibd" {
             no_ibd = true;
         }
         if arg.1 == "--headless" {
@@ -299,8 +300,8 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     let node = Node::new(node_path, node_port);
-    node.write().await.is_syncing = true;
     let handle = Node::init(node.clone(), resolved_peers.clone()).await?;
+    node.write().await.is_syncing = true;
 
     if start_api {
         sleep(Duration::from_secs(1)).await;
