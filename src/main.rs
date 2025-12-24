@@ -1,16 +1,18 @@
-use std::{time::Duration, vec};
+use std::{net::IpAddr, time::Duration, vec};
 
 use anyhow::anyhow;
+use log::{error, info, warn};
 use tokio::{net::lookup_host, time::sleep};
 
-
 use snap_coin::{
-    api::api_server::Server,
+    api::api_server::{self},
     build_block,
     economics::DEV_WALLET,
-    node::{
-        node::Node,
+    full_node::{
+        accept_block, auto_peer::start_auto_peer, connect_peer, create_full_node,
+        p2p_server::start_p2p_server,
     },
+    node::peer::PeerHandle,
 };
 
 use tracing_subscriber::prelude::*;
@@ -32,6 +34,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut create_genesis = false;
     let mut headless = false;
     let mut no_ibd = false;
+    let mut no_auto_peer = false;
 
     for arg in args.iter().enumerate() {
         if arg.1 == "--peers" && args.get(arg.0 + 1).is_some() {
@@ -48,6 +51,9 @@ async fn main() -> Result<(), anyhow::Error> {
         }
         if arg.1 == "--no-ibd" {
             no_ibd = true;
+        }
+        if arg.1 == "--no-auto-peer" {
+            no_auto_peer = true;
         }
         if arg.1 == "--headless" {
             headless = true;
@@ -85,72 +91,79 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     }
 
-    let mut parsed_reserved_ips = vec![];
+    let mut parsed_reserved_ips: Vec<IpAddr> = vec![];
     for reserved_ip in reserved_ips {
         parsed_reserved_ips.push(reserved_ip.parse().expect("Reserved ip is invalid"));
     }
 
-    let node = Node::new(node_path, node_port, parsed_reserved_ips);
+    // Create a node and connect it's initial peers to it
+    let (blockchain, node_state) = create_full_node(node_path, !headless);
+    for initial_peer in &resolved_peers {
+        connect_peer(*initial_peer, &blockchain, &node_state).await?;
+    }
 
-    let handle = Node::init(node.clone(), resolved_peers.clone()).await?;
-    node.write().await.is_syncing = true;
+    *node_state.is_syncing.write().await = true;
 
+    // If no flags against it, start the Snap Coin API server
     if start_api {
         sleep(Duration::from_secs(1)).await;
-        let api_server = Server::new(api_port, node.clone());
+        let api_server = api_server::Server::new(api_port, blockchain.clone(), node_state.clone());
         api_server.listen().await?;
     }
 
+    // If the --create-genesis flag passed, create and submit a genesis block
     if create_genesis {
-        let mut genesis = {
-            let blockchain = &node.read().await.blockchain;
-            let transactions = vec![];
-            build_block(blockchain, &transactions, DEV_WALLET).await?
-        };
+        let mut genesis = build_block(&*blockchain, &vec![], DEV_WALLET).await?;
         #[allow(deprecated)]
         genesis.compute_pow()?;
-        Node::submit_block(node.clone(), genesis).await?;
+        accept_block(&blockchain, &node_state, genesis).await?;
     }
+
+    // If an initial peer was passed, and no flags against it, connect to the first connected peer, and IBD from it
     if !resolved_peers.is_empty() && !no_ibd {
-        let peer = node.read().await.peers[0].clone();
-        let node = node.clone();
+        let peer = node_state
+            .connected_peers
+            .read()
+            .await
+            .values()
+            .collect::<Vec<&PeerHandle>>()[0]
+            .clone();
+        let blockchain = blockchain.clone();
+        let node_state = node_state.clone();
         tokio::spawn(async move {
             sleep(Duration::from_secs(1)).await;
-            Node::log(format!(
-                "[SYNC] Blockchain status {:?}",
-                sync_blockchain(peer, node.clone()).await
-            ));
-            node.write().await.is_syncing = false;
+            info!(
+                "Blockchain sync status {:?}",
+                sync_blockchain(peer, blockchain).await
+            );
+            *node_state.is_syncing.write().await = false;
         });
     } else {
-        node.write().await.is_syncing = false;
+        *node_state.is_syncing.write().await = false;
     }
 
     if resolved_peers.len() != 0 {
-        let node = node.clone();
         let resolved_peers = resolved_peers.clone();
 
         // Peer complete disconnection watchdog
+        let blockchain = blockchain.clone();
+        let node_state = node_state.clone();
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(30)).await;
-                if node.read().await.peers.len() == 0 {
-                    Node::log(
-                        "[WATCHDOG] All peers disconnected, trying to reconnect to seed peer"
-                            .into(),
-                    );
-                    let res = Node::connect_peer(node.clone(), resolved_peers[0]).await;
+                if node_state.connected_peers.read().await.len() == 0 {
+                    warn!("All peers disconnected, trying to reconnect to seed peer");
+                    let res = connect_peer(resolved_peers[0], &blockchain, &node_state).await;
                     match res {
-                        Ok((peer, _handle)) => {
-                            node.write().await.peers.push(peer.clone());
-                            Node::log("[WATCHDOG] Reconnection status: OK".into());
-                            Node::log(format!(
-                                "[WATCHDOG] Re-sync status: {:?}",
-                                sync_blockchain(peer, node.clone()).await
-                            ));
+                        Ok(peer) => {
+                            info!("Reconnection status: OK");
+                            info!(
+                                "Re-sync status: {:?}",
+                                sync_blockchain(peer, blockchain.clone()).await
+                            );
                         }
                         Err(e) => {
-                            Node::log(format!("[WATCHDOG] Reconnection status: {}", e));
+                            error!("Reconnection status: {}", e);
                         }
                     }
                 }
@@ -158,10 +171,18 @@ async fn main() -> Result<(), anyhow::Error> {
         });
     }
 
+    if !no_auto_peer {
+        // No need to capture this join handle
+        let _ = start_auto_peer(node_state.clone(), blockchain.clone(), parsed_reserved_ips);
+    }
+
+    let p2p_server_handle =
+        start_p2p_server(node_port, blockchain.clone(), node_state.clone()).await?;
+
     if headless {
-        println!("{:?}", handle.await);
+        info!("{:?}", p2p_server_handle.await);
     } else {
-        run_tui(node.clone(), node_port, node_path.to_string()).await?;
+        run_tui(node_state, blockchain, node_port, node_path.to_string()).await?;
     }
 
     Ok(())

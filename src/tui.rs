@@ -1,11 +1,51 @@
-use std::{fs, sync::Arc, time::Duration};
+use std::{fs, path::PathBuf, time::Duration};
 
-use crossterm::{event::{self, Event, KeyCode}, execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode}};
-use ratatui::{Terminal, layout::{Constraint, Direction, Layout}, prelude::CrosstermBackend, widgets::{Borders, Paragraph}};
-use snap_coin::node::node::Node;
-use tokio::sync::RwLock;
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use log::info;
+use ratatui::{
+    Terminal,
+    layout::{Constraint, Direction, Layout},
+    prelude::CrosstermBackend,
+    widgets::{Borders, Paragraph},
+};
+use snap_coin::full_node::{SharedBlockchain, node_state::SharedNodeState};
 
-pub async fn run_tui(node: Arc<RwLock<Node>>, node_port: u16, node_path: String) -> anyhow::Result<()> {
+/// Returns the latest log file path in `node_path/logs/` matching the pattern `snap-coin-node_*.log`
+fn latest_log_file(node_path: &str) -> Option<PathBuf> {
+    let logs_dir = format!("{}/logs", node_path);
+    let mut entries: Vec<_> = fs::read_dir(&logs_dir)
+        .ok()?
+        .filter_map(|res| res.ok())
+        .filter(|e| {
+            e.path()
+                .file_name()
+                .and_then(|f| f.to_str())
+                .map(|s| s.starts_with("snap-coin-node_") && s.ends_with(".log"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    // Sort by modified time (descending)
+    entries.sort_by_key(|e| {
+        fs::metadata(e.path())
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
+    entries.reverse();
+
+    entries.first().map(|e| e.path())
+}
+
+pub async fn run_tui(
+    node_state: SharedNodeState,
+    blockchain: SharedBlockchain,
+    node_port: u16,
+    node_path: String,
+) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -23,23 +63,15 @@ pub async fn run_tui(node: Arc<RwLock<Node>>, node_port: u16, node_path: String)
     loop {
         // --- READ NODE STATE SAFELY (NO ASYNC IN DRAW LOOP) ---
         let node_state = {
-            let guard = node.read().await;
-
             // Blockchain
-            let height = guard.blockchain.get_height();
-            let syncing = guard.is_syncing;
-            let last_block = guard
-                .blockchain
-                .get_block_hash_by_height(height.saturating_sub(1))
-                .map(|b| b.dump_base36())
-                .unwrap_or("<no block>".to_string());
+            let height = blockchain.block_store().get_height();
+            let syncing = node_state.is_syncing.read().await;
+            let last_block = blockchain.block_store().get_last_block_hash().dump_base36();
 
             // Peer snapshot (NO CLONING PEER)
             let mut peer_snaps = Vec::new();
-            for p in guard.peers.clone() {
-                // clones Arc, safe
-                let p = p.read().await;
-                peer_snaps.push((p.address.clone(), p.is_client));
+            for peer in node_state.connected_peers.read().await.values() {
+                peer_snaps.push((peer.address, peer.is_client));
             }
 
             (height, last_block, peer_snaps, syncing)
@@ -49,7 +81,10 @@ pub async fn run_tui(node: Arc<RwLock<Node>>, node_port: u16, node_path: String)
 
         // --- READ LOG (INFREQUENTLY, NON-BLOCKING) ---
         if last_log_read.elapsed() > Duration::from_millis(300) {
-            cached_log = fs::read_to_string(format!("{}/info.log", node_path)).unwrap_or_default();
+            if let Some(latest) = latest_log_file(&node_path) {
+                cached_log = fs::read_to_string(latest).unwrap_or_default();
+            }
+
             last_log_read = std::time::Instant::now();
         }
 
@@ -117,10 +152,12 @@ pub async fn run_tui(node: Arc<RwLock<Node>>, node_port: u16, node_path: String)
                     KeyCode::Down => log_scroll = log_scroll.saturating_add(1),
 
                     KeyCode::Char('c') => {
-                        let _ = fs::write(format!("{}/info.log", node_path), "");
-                        Node::log("Log cleared".into());
-                        cached_log.clear();
-                        log_scroll = 0;
+                        if let Some(latest) = latest_log_file(&node_path) {
+                            let _ = fs::write(latest, "");
+                            info!("Log cleared");
+                            cached_log.clear();
+                            log_scroll = 0;
+                        }
                     }
 
                     _ => {}
