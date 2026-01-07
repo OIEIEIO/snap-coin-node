@@ -7,6 +7,7 @@ use tokio::{net::lookup_host, time::sleep};
 use snap_coin::{
     api::api_server::{self},
     build_block,
+    crypto::randomx_use_full_mode,
     economics::DEV_WALLET,
     full_node::{
         accept_block, auto_peer::start_auto_peer, connect_peer, create_full_node,
@@ -35,6 +36,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut headless = false;
     let mut no_ibd = false;
     let mut no_auto_peer = false;
+    let mut randomx_full_mode = false;
 
     for arg in args.iter().enumerate() {
         if arg.1 == "--peers" && args.get(arg.0 + 1).is_some() {
@@ -61,6 +63,9 @@ async fn main() -> Result<(), anyhow::Error> {
         if arg.1 == "--create-genesis" {
             create_genesis = true;
         }
+        if arg.1 == "--full-memory" {
+            randomx_full_mode = true;
+        }
         if arg.1 == "--api-port" && args.get(arg.0 + 1).is_some() {
             api_port = args[arg.0 + 1].parse().expect("Invalid api port parameter");
         }
@@ -76,6 +81,10 @@ async fn main() -> Result<(), anyhow::Error> {
                 .is_err()
             {}
         }
+    }
+
+    if randomx_full_mode {
+        randomx_use_full_mode();
     }
 
     let mut resolved_peers = Vec::new();
