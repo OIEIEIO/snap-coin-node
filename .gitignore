@@ -1,4 +1,6 @@
 /target
 Cargo.lock
 /node-testnet
+/node-testnet2
 /node-mainnet
+/node-mainnet2
