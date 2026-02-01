@@ -11,16 +11,15 @@ use snap_coin::{
     economics::DEV_WALLET,
     full_node::{
         accept_block, auto_peer::start_auto_peer, connect_peer, create_full_node,
-        p2p_server::start_p2p_server,
+        ibd::ibd_blockchain, p2p_server::start_p2p_server,
     },
     node::peer::PeerHandle,
 };
 
 use tracing_subscriber::prelude::*;
 
-use crate::{sync::ibd_blockchain, tui::run_tui};
+use crate::tui::run_tui;
 
-mod sync;
 mod tui;
 
 #[tokio::main]
