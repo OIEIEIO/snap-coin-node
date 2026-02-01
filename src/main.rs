@@ -7,7 +7,7 @@ use tokio::{net::lookup_host, time::sleep};
 use snap_coin::{
     api::api_server::{self},
     build_block,
-    crypto::randomx_use_full_mode,
+    crypto::{Hash, randomx_use_full_mode},
     economics::DEV_WALLET,
     full_node::{
         accept_block, auto_peer::start_auto_peer, connect_peer, create_full_node,
@@ -18,7 +18,7 @@ use snap_coin::{
 
 use tracing_subscriber::prelude::*;
 
-use crate::{sync::sync_blockchain, tui::run_tui};
+use crate::{sync::ibd_blockchain, tui::run_tui};
 
 mod sync;
 mod tui;
@@ -35,6 +35,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut create_genesis = false;
     let mut headless = false;
     let mut no_ibd = false;
+    let mut full_ibd = false;
     let mut no_auto_peer = false;
     let mut randomx_full_mode = false;
 
@@ -53,6 +54,9 @@ async fn main() -> Result<(), anyhow::Error> {
         }
         if arg.1 == "--no-ibd" {
             no_ibd = true;
+        }
+        if arg.1 == "--full-ibd" {
+            full_ibd = true;
         }
         if arg.1 == "--no-auto-peer" {
             no_auto_peer = true;
@@ -83,8 +87,17 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     }
 
+    if !full_ibd {
+        println!(
+            "IBD in normal mode. Will not validate transaction hashes that are > 500 blocks away from head."
+        );
+    }
+
     if randomx_full_mode {
         randomx_use_full_mode();
+        Hash::new(b"INIT"); // Get RandomX initialized
+    } else {
+        println!("RandomX started in light mode.");
     }
 
     let mut resolved_peers = Vec::new();
@@ -143,7 +156,7 @@ async fn main() -> Result<(), anyhow::Error> {
             sleep(Duration::from_secs(1)).await;
             info!(
                 "Blockchain sync status {:?}",
-                sync_blockchain(peer, blockchain).await
+                ibd_blockchain(peer, blockchain, full_ibd).await
             );
             *node_state.is_syncing.write().await = false;
         });
@@ -168,7 +181,7 @@ async fn main() -> Result<(), anyhow::Error> {
                             info!("Reconnection status: OK");
                             info!(
                                 "Re-sync status: {:?}",
-                                sync_blockchain(peer, blockchain.clone()).await
+                                ibd_blockchain(peer, blockchain.clone(), full_ibd).await
                             );
                         }
                         Err(e) => {

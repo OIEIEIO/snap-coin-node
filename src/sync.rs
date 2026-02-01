@@ -1,5 +1,7 @@
+use std::sync::atomic::AtomicUsize;
+
 use anyhow::anyhow;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::{StreamExt, TryStreamExt, stream};
 use log::info;
 use snap_coin::{
     full_node::SharedBlockchain,
@@ -9,13 +11,18 @@ use snap_coin::{
     },
 };
 
-pub async fn sync_blockchain(
+const IBD_SAFE_SKIP_TX_HASHING: usize = 500;
+
+pub async fn ibd_blockchain(
     peer: PeerHandle,
     blockchain: SharedBlockchain,
+    full_ibd: bool
 ) -> Result<(), anyhow::Error> {
     info!("Starting initial block download");
 
     let local_height = blockchain.block_store().get_height();
+
+    // ---- Fetch remote height ----
     let remote_height = match peer
         .request(Message::new(Command::Ping {
             height: local_height,
@@ -27,6 +34,12 @@ pub async fn sync_blockchain(
         _ => return Err(anyhow!("Could not fetch peer height to sync blockchain")),
     };
 
+    if remote_height <= local_height {
+        info!("[SYNC] Already synced");
+        return Ok(());
+    }
+
+    // ---- Fetch block hashes ----
     let hashes = match peer
         .request(Message::new(Command::GetBlockHashes {
             start: local_height,
@@ -43,62 +56,44 @@ pub async fn sync_blockchain(
         }
     };
 
-    info!("[SYNC] Fetched block hashes");
+    info!("[SYNC] Fetched {} block hashes", hashes.len());
 
-    // Use FuturesUnordered to buffer block downloads
-    let mut block_futures = FuturesUnordered::new();
-    const BUFFER_SIZE: usize = 10; // max number of blocks to fetch concurrently
+    const BUFFER_SIZE: usize = 10;
 
-    for hash in hashes {
-        let peer = peer.clone();
-        // Start the request immediately
-        block_futures.push(async move {
-            let block = match peer
-                .request(Message::new(Command::GetBlock { block_hash: hash }))
-                .await
-            {
-                Ok(resp) => match resp.command {
-                    Command::GetBlockResponse { block } => Ok((hash, block)),
+    let left = AtomicUsize::new(remote_height);
+    
+    // ---- Download concurrently, apply sequentially ----
+    stream::iter(hashes)
+        .map(|hash| {
+            let peer = peer.clone();
+
+            async move {
+                let resp = peer
+                    .request(Message::new(Command::GetBlock { block_hash: hash }))
+                    .await?;
+
+                match resp.command {
+                    Command::GetBlockResponse { block } => block
+                        .ok_or_else(|| anyhow!("Peer returned empty block {}", hash.dump_base36())),
                     _ => Err(anyhow!(
                         "Unexpected response for block {}",
                         hash.dump_base36()
                     )),
-                },
-                Err(e) => Err(anyhow!(
-                    "Failed to fetch block {}: {:?}",
-                    hash.dump_base36(),
-                    e
-                )),
-            };
-            block
-        });
-
-        // Keep the buffer size limited
-        if block_futures.len() >= BUFFER_SIZE {
-            if let Some(result) = block_futures.next().await {
-                match result {
-                    Ok((_hash, Some(block))) => {
-                        blockchain.add_block(block)?
-                    },
-                    Ok((hash, None)) => {
-                        return Err(anyhow!("Peer returned empty block {}", hash.dump_base36()));
-                    }
-                    Err(e) => return Err(e),
                 }
             }
-        }
-    }
-
-    // Finish remaining futures
-    while let Some(result) = block_futures.next().await {
-        match result {
-            Ok((_hash, Some(block))) => blockchain.add_block(block)?,
-            Ok((hash, None)) => {
-                return Err(anyhow!("Peer returned empty block {}", hash.dump_base36()));
+        })
+        .buffered(BUFFER_SIZE) // 👈 keeps order, runs concurrently
+        .try_for_each(|block| async {
+            let left_to_add = left.load(std::sync::atomic::Ordering::SeqCst);
+            blockchain.add_block(block, left_to_add > IBD_SAFE_SKIP_TX_HASHING && !full_ibd)?;
+            if left_to_add > 0 {
+                left.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             }
-            Err(e) => return Err(e),
-        }
-    }
+            Ok(())
+        })
+        .await?;
+
+    info!("[SYNC] Blockchain synced successfully");
 
     Ok(())
 }
