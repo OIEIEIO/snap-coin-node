@@ -1,7 +1,7 @@
 use std::{net::IpAddr, time::Duration, vec};
 
 use anyhow::anyhow;
-use log::{error, info, warn};
+use log::info;
 use tokio::{net::lookup_host, time::sleep};
 
 use snap_coin::{
@@ -10,10 +10,9 @@ use snap_coin::{
     crypto::{Hash, randomx_use_full_mode},
     economics::DEV_WALLET,
     full_node::{
-        accept_block, auto_peer::start_auto_peer, connect_peer, create_full_node,
-        ibd::ibd_blockchain, p2p_server::start_p2p_server,
+        accept_block, auto_peer::start_auto_peer, auto_reconnect::start_auto_reconnect,
+        connect_peer, create_full_node, ibd::ibd_blockchain, p2p_server::start_p2p_server,
     },
-    node::peer::PeerHandle,
 };
 
 use tracing_subscriber::prelude::*;
@@ -21,6 +20,8 @@ use tracing_subscriber::prelude::*;
 use crate::tui::run_tui;
 
 mod tui;
+mod upgrade;
+mod deprecated_block_store;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -98,6 +99,8 @@ async fn main() -> Result<(), anyhow::Error> {
     } else {
         println!("RandomX started in light mode.");
     }
+    
+    upgrade::upgrade(node_path).await?;
 
     let mut resolved_peers = Vec::new();
 
@@ -142,20 +145,13 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // If an initial peer was passed, and no flags against it, connect to the first connected peer, and IBD from it
     if !resolved_peers.is_empty() && !no_ibd {
-        let peer = node_state
-            .connected_peers
-            .read()
-            .await
-            .values()
-            .collect::<Vec<&PeerHandle>>()[0]
-            .clone();
         let blockchain = blockchain.clone();
         let node_state = node_state.clone();
         tokio::spawn(async move {
             sleep(Duration::from_secs(1)).await;
             info!(
                 "Blockchain sync status {:?}",
-                ibd_blockchain(peer, blockchain, full_ibd).await
+                ibd_blockchain(node_state.clone(), blockchain, full_ibd).await
             );
             *node_state.is_syncing.write().await = false;
         });
@@ -169,27 +165,8 @@ async fn main() -> Result<(), anyhow::Error> {
         // Peer complete disconnection watchdog
         let blockchain = blockchain.clone();
         let node_state = node_state.clone();
-        tokio::spawn(async move {
-            loop {
-                sleep(Duration::from_secs(30)).await;
-                if node_state.connected_peers.read().await.len() == 0 {
-                    warn!("All peers disconnected, trying to reconnect to seed peer");
-                    let res = connect_peer(resolved_peers[0], &blockchain, &node_state).await;
-                    match res {
-                        Ok(peer) => {
-                            info!("Reconnection status: OK");
-                            info!(
-                                "Re-sync status: {:?}",
-                                ibd_blockchain(peer, blockchain.clone(), full_ibd).await
-                            );
-                        }
-                        Err(e) => {
-                            error!("Reconnection status: {}", e);
-                        }
-                    }
-                }
-            }
-        });
+
+        let _ = start_auto_reconnect(node_state, blockchain, resolved_peers, full_ibd);
     }
 
     if !no_auto_peer {
