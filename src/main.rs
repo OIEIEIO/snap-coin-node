@@ -7,7 +7,7 @@ use tokio::{net::lookup_host, time::sleep};
 use snap_coin::{
     api::api_server::{self},
     build_block,
-    crypto::{Hash, randomx_use_full_mode},
+    crypto::{Hash, randomx_optimized_mode},
     economics::DEV_WALLET,
     full_node::{
         accept_block, auto_peer::start_auto_peer, auto_reconnect::start_auto_reconnect,
@@ -19,9 +19,9 @@ use tracing_subscriber::prelude::*;
 
 use crate::tui::run_tui;
 
+mod deprecated_block_store;
 mod tui;
 mod upgrade;
-mod deprecated_block_store;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -94,12 +94,12 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     if randomx_full_mode {
-        randomx_use_full_mode();
+        randomx_optimized_mode(true);
         Hash::new(b"INIT"); // Get RandomX initialized
     } else {
         println!("RandomX started in light mode.");
     }
-    
+
     upgrade::upgrade(node_path).await?;
 
     let mut resolved_peers = Vec::new();
