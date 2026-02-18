@@ -18,31 +18,6 @@ use ratatui::{
 };
 use snap_coin::full_node::{SharedBlockchain, node_state::SharedNodeState};
 
-/// Returns the latest log file path in `node_path/logs/`
-fn latest_log_file(node_path: &str) -> Option<PathBuf> {
-    let logs_dir = format!("{}/logs", node_path);
-    let mut entries: Vec<_> = fs::read_dir(&logs_dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .file_name()
-                .and_then(|f| f.to_str())
-                .map(|s| s.starts_with("snap-coin-node_") && s.ends_with(".log"))
-                .unwrap_or(false)
-        })
-        .collect();
-
-    entries.sort_by_key(|e| {
-        fs::metadata(e.path())
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-    });
-    entries.reverse();
-
-    entries.first().map(|e| e.path())
-}
-
 #[derive(Copy, Clone, PartialEq)]
 enum Focus {
     Stats,
@@ -54,7 +29,7 @@ pub async fn run_tui(
     node_state: SharedNodeState,
     blockchain: SharedBlockchain,
     node_port: u16,
-    node_path: String,
+    latest_log_file: PathBuf,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -77,6 +52,7 @@ pub async fn run_tui(
     let mut last_log_read = Instant::now();
     let mut last_mempool_size = 0usize;
 
+    let latest_log_file_clone = latest_log_file.clone();
     loop {
         let (height, last_block, peers, syncing) = {
             let height = blockchain.block_store().get_height();
@@ -95,13 +71,11 @@ pub async fn run_tui(
         };
 
         if last_log_read.elapsed() > Duration::from_millis(300) {
-            if let Some(latest) = latest_log_file(&node_path) {
-                let new_log = fs::read_to_string(latest).unwrap_or_default();
-                if new_log.len() != cached_log.len() {
-                    cached_log = new_log;
-                    if auto_scroll_logs {
-                        logs_scroll_y = cached_log.lines().count().saturating_sub(1) as u16;
-                    }
+            let new_log = fs::read_to_string(&latest_log_file_clone).unwrap_or_default();
+            if new_log.len() != cached_log.len() {
+                cached_log = new_log;
+                if auto_scroll_logs {
+                    logs_scroll_y = cached_log.lines().count().saturating_sub(1) as u16;
                 }
             }
 
@@ -221,13 +195,11 @@ pub async fn run_tui(
                     },
 
                     KeyCode::Char('c') if focus == Focus::Logs => {
-                        if let Some(latest) = latest_log_file(&node_path) {
-                            let _ = fs::write(latest, "");
-                            info!("Log cleared");
-                            cached_log.clear();
-                            logs_scroll_y = 0;
-                            auto_scroll_logs = true;
-                        }
+                        let _ = fs::write(&latest_log_file, "");
+                        info!("Log cleared");
+                        cached_log.clear();
+                        logs_scroll_y = 0;
+                        auto_scroll_logs = true;
                     }
 
                     _ => {}
