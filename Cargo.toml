@@ -1,8 +1,8 @@
 [package]
 name = "snap-coin-node"
-version = "16.0.0"
+version = "16.0.0-oieieio1"
 edition = "2024"
-authors = ["Ice"]
+authors = ["OIEIEIO"]
 description = "A simple CLI for hosting a Snap Coin node"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -14,8 +14,7 @@ crossterm = "0.29.0"
 futures = "0.3.31"
 log = "0.4.29"
 ratatui = "0.29.0"
-# snap-coin = { path = "../snap-coin", features = ["full"] }
-snap-coin = { version = "=16.0.0", features = ["full", "full-node"] }
+snap-coin = { path = "../snap-coin", features = ["full", "full-node"] }
 tokio = { version = "1.48.0", features = ["full", "tracing"] }
 tracing-subscriber = "0.3.22"
 bincode = "2.0.1"
